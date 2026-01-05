@@ -170,7 +170,10 @@ async fn main() -> Result<()> {
                 if let Some(folders) = folders.as_array() {
                     for folder in folders {
                         let id = folder.get("id").and_then(|i| i.as_str()).unwrap_or("?");
-                        let label = folder.get("label").and_then(|l| l.as_str()).unwrap_or(id);
+                        let label = folder.get("label")
+                            .and_then(|l| l.as_str())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(id);
                         let paused = folder.get("paused").and_then(|p| p.as_bool()).unwrap_or(false);
 
                         let last_scan = stats
