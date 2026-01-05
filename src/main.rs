@@ -133,7 +133,10 @@ async fn main() -> Result<()> {
             if api_key.is_none() && host.is_none() {
                 // Show current config
                 let cfg = config::load_config()?;
-                println!("API Key: {}", cfg.api_key.as_deref().unwrap_or("(from syncthing config)"));
+                println!(
+                    "API Key: {}",
+                    cfg.api_key.as_deref().unwrap_or("(from syncthing config)")
+                );
                 println!("Host: {}", cfg.host());
             } else {
                 let mut cfg = config::load_config()?;
@@ -154,7 +157,13 @@ async fn main() -> Result<()> {
             let version = client.version().await?;
             let completion = client.db_completion().await?;
 
-            println!("Syncthing {}", version.get("version").and_then(|v| v.as_str()).unwrap_or("unknown"));
+            println!(
+                "Syncthing {}",
+                version
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+            );
             println!();
 
             let uptime = status.get("uptime").and_then(|u| u.as_u64()).unwrap_or(0);
@@ -166,9 +175,18 @@ async fn main() -> Result<()> {
             let sys = status.get("sys").and_then(|s| s.as_u64()).unwrap_or(0);
             println!("Memory: {} / {}", format_bytes(alloc), format_bytes(sys));
 
-            let global_bytes = completion.get("globalBytes").and_then(|b| b.as_u64()).unwrap_or(0);
-            let need_bytes = completion.get("needBytes").and_then(|b| b.as_u64()).unwrap_or(0);
-            let pct = completion.get("completion").and_then(|c| c.as_f64()).unwrap_or(100.0);
+            let global_bytes = completion
+                .get("globalBytes")
+                .and_then(|b| b.as_u64())
+                .unwrap_or(0);
+            let need_bytes = completion
+                .get("needBytes")
+                .and_then(|b| b.as_u64())
+                .unwrap_or(0);
+            let pct = completion
+                .get("completion")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(100.0);
 
             println!();
             println!("Sync: {:.1}% complete", pct);
@@ -190,11 +208,15 @@ async fn main() -> Result<()> {
                 if let Some(folders) = folders.as_array() {
                     for folder in folders {
                         let id = folder.get("id").and_then(|i| i.as_str()).unwrap_or("?");
-                        let label = folder.get("label")
+                        let label = folder
+                            .get("label")
                             .and_then(|l| l.as_str())
                             .filter(|s| !s.is_empty())
                             .unwrap_or(id);
-                        let paused = folder.get("paused").and_then(|p| p.as_bool()).unwrap_or(false);
+                        let paused = folder
+                            .get("paused")
+                            .and_then(|p| p.as_bool())
+                            .unwrap_or(false);
 
                         if paused {
                             println!("{:<20} paused", label);
@@ -204,14 +226,28 @@ async fn main() -> Result<()> {
                         // Get sync status for this folder
                         match client.db_status(id).await {
                             Ok(status) => {
-                                let state = status.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
-                                let need_files = status.get("needFiles").and_then(|n| n.as_u64()).unwrap_or(0);
-                                let need_bytes = status.get("needBytes").and_then(|n| n.as_u64()).unwrap_or(0);
-                                let errors = status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
+                                let state = status
+                                    .get("state")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("unknown");
+                                let need_files = status
+                                    .get("needFiles")
+                                    .and_then(|n| n.as_u64())
+                                    .unwrap_or(0);
+                                let need_bytes = status
+                                    .get("needBytes")
+                                    .and_then(|n| n.as_u64())
+                                    .unwrap_or(0);
+                                let errors =
+                                    status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
 
                                 let mut status_parts = vec![state.to_string()];
                                 if need_files > 0 {
-                                    status_parts.push(format!("{} files ({})", need_files, format_bytes(need_bytes)));
+                                    status_parts.push(format!(
+                                        "{} files ({})",
+                                        need_files,
+                                        format_bytes(need_bytes)
+                                    ));
                                 }
                                 if errors > 0 {
                                     status_parts.push(format!("{} errors", errors));
@@ -236,7 +272,10 @@ async fn main() -> Result<()> {
 
             if let Some(devices) = devices.as_array() {
                 for device in devices {
-                    let id = device.get("deviceID").and_then(|i| i.as_str()).unwrap_or("?");
+                    let id = device
+                        .get("deviceID")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("?");
                     let name = device.get("name").and_then(|n| n.as_str()).unwrap_or(id);
                     let short_id = &id[..7.min(id.len())];
 
@@ -255,7 +294,10 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "never".to_string());
 
                     let status = if connected { "connected" } else { "offline" };
-                    println!("{:<20} ({}) {:<12} last: {}", name, short_id, status, last_seen);
+                    println!(
+                        "{:<20} ({}) {:<12} last: {}",
+                        name, short_id, status, last_seen
+                    );
                 }
             }
         }
@@ -322,7 +364,10 @@ async fn main() -> Result<()> {
                     println!("  (none)");
                 } else {
                     for (id, info) in devs {
-                        let name = info.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        let name = info
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
                         println!("  {} ({})", name, &id[..7.min(id.len())]);
                     }
                 }
@@ -336,8 +381,15 @@ async fn main() -> Result<()> {
                     for (device_id, device_folders) in flds {
                         if let Some(folders) = device_folders.as_object() {
                             for (folder_id, info) in folders {
-                                let label = info.get("label").and_then(|l| l.as_str()).unwrap_or(folder_id);
-                                println!("  {} from {}", label, &device_id[..7.min(device_id.len())]);
+                                let label = info
+                                    .get("label")
+                                    .and_then(|l| l.as_str())
+                                    .unwrap_or(folder_id);
+                                println!(
+                                    "  {} from {}",
+                                    label,
+                                    &device_id[..7.min(device_id.len())]
+                                );
                             }
                         }
                     }

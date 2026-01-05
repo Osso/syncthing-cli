@@ -105,7 +105,8 @@ impl Client {
 
     // Database endpoints
     pub async fn db_status(&self, folder: &str) -> Result<Value> {
-        self.get(&format!("/rest/db/status?folder={}", folder)).await
+        self.get(&format!("/rest/db/status?folder={}", folder))
+            .await
     }
 
     pub async fn db_completion(&self) -> Result<Value> {
@@ -117,7 +118,8 @@ impl Client {
     }
 
     pub async fn db_scan(&self, folder: &str) -> Result<Value> {
-        self.post(&format!("/rest/db/scan?folder={}", folder), None).await
+        self.post(&format!("/rest/db/scan?folder={}", folder), None)
+            .await
     }
 
     pub async fn db_scan_all(&self) -> Result<Value> {
@@ -144,7 +146,8 @@ impl Client {
 
     // Folder endpoints
     pub async fn folder_errors(&self, folder: &str) -> Result<Value> {
-        self.get(&format!("/rest/folder/errors?folder={}", folder)).await
+        self.get(&format!("/rest/folder/errors?folder={}", folder))
+            .await
     }
 
     // Events

@@ -61,8 +61,7 @@ pub fn get_api_key() -> Result<String> {
 
 pub fn extract_api_key_from_path(path: &PathBuf) -> Result<String> {
     if path.exists() {
-        let content = fs::read_to_string(path)
-            .context("Failed to read syncthing config.xml")?;
+        let content = fs::read_to_string(path).context("Failed to read syncthing config.xml")?;
         return extract_api_key_from_xml(&content);
     }
 
