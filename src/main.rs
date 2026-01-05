@@ -9,6 +9,10 @@ use clap::{Parser, Subcommand};
 #[command(name = "syncthing")]
 #[command(about = "Syncthing CLI for monitoring and control")]
 struct Cli {
+    /// Host URL (e.g., 192.168.2.32:8384 or http://host:8384)
+    #[arg(short = 'H', long, global = true)]
+    host: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -32,6 +36,9 @@ enum Commands {
     },
     /// Show sync errors
     Errors {
+        /// Show errors for specific folder
+        #[arg(short, long)]
+        folder: Option<String>,
         /// Clear all errors
         #[arg(short, long)]
         clear: bool,
@@ -59,10 +66,23 @@ enum Commands {
     },
 }
 
-fn get_client() -> Result<api::Client> {
+fn get_client(host_override: Option<&str>) -> Result<api::Client> {
     let api_key = config::get_api_key()?;
     let cfg = config::load_config()?;
-    api::Client::new(&api_key, cfg.host())
+
+    let host = match host_override {
+        Some(h) => {
+            // Add http:// if no scheme provided
+            if h.starts_with("http://") || h.starts_with("https://") {
+                h.to_string()
+            } else {
+                format!("http://{}", h)
+            }
+        }
+        None => cfg.host().to_string(),
+    };
+
+    api::Client::new(&api_key, &host)
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -106,6 +126,7 @@ fn format_duration_since(timestamp: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let host_override = cli.host.as_deref();
 
     match cli.command {
         Commands::Config { api_key, host } => {
@@ -128,7 +149,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Status => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             let status = client.status().await?;
             let version = client.version().await?;
             let completion = client.db_completion().await?;
@@ -158,14 +179,13 @@ async fn main() -> Result<()> {
         }
 
         Commands::Folders { id } => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
 
             if let Some(folder_id) = id {
                 let status = client.db_status(&folder_id).await?;
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 let folders = client.config_folders().await?;
-                let stats = client.stats_folder().await?;
 
                 if let Some(folders) = folders.as_array() {
                     for folder in folders {
@@ -176,22 +196,40 @@ async fn main() -> Result<()> {
                             .unwrap_or(id);
                         let paused = folder.get("paused").and_then(|p| p.as_bool()).unwrap_or(false);
 
-                        let last_scan = stats
-                            .get(id)
-                            .and_then(|s| s.get("lastScan"))
-                            .and_then(|t| t.as_str())
-                            .map(format_duration_since)
-                            .unwrap_or_else(|| "never".to_string());
+                        if paused {
+                            println!("{:<20} paused", label);
+                            continue;
+                        }
 
-                        let status_str = if paused { "paused" } else { "active" };
-                        println!("{:<20} {:<10} (last scan: {})", label, status_str, last_scan);
+                        // Get sync status for this folder
+                        match client.db_status(id).await {
+                            Ok(status) => {
+                                let state = status.get("state").and_then(|s| s.as_str()).unwrap_or("unknown");
+                                let need_files = status.get("needFiles").and_then(|n| n.as_u64()).unwrap_or(0);
+                                let need_bytes = status.get("needBytes").and_then(|n| n.as_u64()).unwrap_or(0);
+                                let errors = status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
+
+                                let mut status_parts = vec![state.to_string()];
+                                if need_files > 0 {
+                                    status_parts.push(format!("{} files ({})", need_files, format_bytes(need_bytes)));
+                                }
+                                if errors > 0 {
+                                    status_parts.push(format!("{} errors", errors));
+                                }
+
+                                println!("{:<20} {}", label, status_parts.join(", "));
+                            }
+                            Err(_) => {
+                                println!("{:<20} (status unavailable)", label);
+                            }
+                        }
                     }
                 }
             }
         }
 
         Commands::Devices => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             let devices = client.config_devices().await?;
             let connections = client.connections().await?;
             let stats = client.stats_device().await?;
@@ -223,7 +261,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Scan { folder } => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             if let Some(f) = folder {
                 client.db_scan(&f).await?;
                 println!("Scan triggered for folder: {}", f);
@@ -233,12 +271,29 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Errors { clear } => {
-            let client = get_client()?;
+        Commands::Errors { folder, clear } => {
+            let client = get_client(host_override)?;
             if clear {
                 client.clear_errors().await?;
                 println!("Errors cleared");
+            } else if let Some(folder_id) = folder {
+                // Show folder-specific errors
+                let errors = client.folder_errors(&folder_id).await?;
+                if let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) {
+                    if errs.is_empty() {
+                        println!("No errors for folder '{}'", folder_id);
+                    } else {
+                        for err in errs {
+                            let path = err.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                            let error = err.get("error").and_then(|e| e.as_str()).unwrap_or("?");
+                            println!("{}: {}", path, error);
+                        }
+                    }
+                } else {
+                    println!("No errors for folder '{}'", folder_id);
+                }
             } else {
+                // Show system errors
                 let errors = client.errors().await?;
                 if let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) {
                     if errs.is_empty() {
@@ -257,7 +312,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Pending => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             let devices = client.pending_devices().await?;
             let folders = client.pending_folders().await?;
 
@@ -291,19 +346,19 @@ async fn main() -> Result<()> {
         }
 
         Commands::Restart => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             client.restart().await?;
             println!("Syncthing restart initiated");
         }
 
         Commands::Shutdown => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             client.shutdown().await?;
             println!("Syncthing shutdown initiated");
         }
 
         Commands::Events { limit } => {
-            let client = get_client()?;
+            let client = get_client(host_override)?;
             let events = client.events(None, Some(limit)).await?;
 
             if let Some(events) = events.as_array() {

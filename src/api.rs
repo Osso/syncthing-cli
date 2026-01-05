@@ -11,7 +11,9 @@ pub struct Client {
 
 impl Client {
     pub fn new(api_key: &str, base_url: &str) -> Result<Self> {
-        let http = reqwest::Client::builder().build()?;
+        let http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // Syncthing uses self-signed certs
+            .build()?;
         Ok(Self {
             http,
             api_key: api_key.to_string(),
