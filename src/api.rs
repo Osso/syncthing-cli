@@ -162,3 +162,185 @@ impl Client {
         self.get(&url).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/status"))
+            .and(header("X-API-Key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "alloc": 12345678,
+                "sys": 23456789,
+                "uptime": 3600
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.status().await.unwrap();
+
+        assert_eq!(result["uptime"], 3600);
+        assert_eq!(result["alloc"], 12345678);
+    }
+
+    #[tokio::test]
+    async fn test_version() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "v1.23.0",
+                "longVersion": "syncthing v1.23.0"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.version().await.unwrap();
+
+        assert_eq!(result["version"], "v1.23.0");
+    }
+
+    #[tokio::test]
+    async fn test_config_folders() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/config/folders"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "folder1", "label": "Documents", "paused": false},
+                {"id": "folder2", "label": "Photos", "paused": true}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.config_folders().await.unwrap();
+
+        let folders = result.as_array().unwrap();
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0]["label"], "Documents");
+    }
+
+    #[tokio::test]
+    async fn test_config_devices() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/config/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"deviceID": "ABC123", "name": "Laptop"},
+                {"deviceID": "DEF456", "name": "Phone"}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.config_devices().await.unwrap();
+
+        let devices = result.as_array().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0]["name"], "Laptop");
+    }
+
+    #[tokio::test]
+    async fn test_db_completion() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/db/completion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "completion": 100.0,
+                "globalBytes": 1000000,
+                "needBytes": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.db_completion().await.unwrap();
+
+        assert_eq!(result["completion"], 100.0);
+        assert_eq!(result["needBytes"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_errors() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/error"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [
+                    {"when": "2024-01-01T00:00:00Z", "message": "Test error"}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.errors().await.unwrap();
+
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["message"], "Test error");
+    }
+
+    #[tokio::test]
+    async fn test_post_scan() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/rest/db/scan"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.db_scan_all().await.unwrap();
+
+        assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_api_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/status"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("bad-key", &mock_server.uri()).unwrap();
+        let result = client.status().await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn test_pending_devices() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/cluster/pending/devices"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.pending_devices().await.unwrap();
+
+        assert!(result.as_object().unwrap().is_empty());
+    }
+}
