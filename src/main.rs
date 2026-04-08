@@ -229,8 +229,7 @@ async fn cmd_folders(client: api::Client, id: Option<String>) -> Result<()> {
                             .get("needBytes")
                             .and_then(|n| n.as_u64())
                             .unwrap_or(0);
-                        let errors =
-                            status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
+                        let errors = status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
 
                         let mut status_parts = vec![state.to_string()];
                         if need_files > 0 {
@@ -374,11 +373,7 @@ async fn cmd_pending(client: api::Client) -> Result<()> {
                             .get("label")
                             .and_then(|l| l.as_str())
                             .unwrap_or(folder_id);
-                        println!(
-                            "  {} from {}",
-                            label,
-                            &device_id[..7.min(device_id.len())]
-                        );
+                        println!("  {} from {}", label, &device_id[..7.min(device_id.len())]);
                     }
                 }
             }
