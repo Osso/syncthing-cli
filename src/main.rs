@@ -67,22 +67,58 @@ enum Commands {
 }
 
 fn get_client(host_override: Option<&str>) -> Result<api::Client> {
-    let api_key = config::get_api_key()?;
     let cfg = config::load_config()?;
-
-    let host = match host_override {
-        Some(h) => {
-            // Add http:// if no scheme provided
-            if h.starts_with("http://") || h.starts_with("https://") {
-                h.to_string()
-            } else {
-                format!("http://{}", h)
-            }
-        }
-        None => cfg.host().to_string(),
-    };
+    let host = host_override
+        .map(normalize_host)
+        .unwrap_or_else(|| cfg.host().to_string());
+    let api_key = api_key_for_host(host_override, &host)?;
 
     api::Client::new(&api_key, &host)
+}
+
+fn normalize_host(host: &str) -> String {
+    if host.starts_with("http://") || host.starts_with("https://") {
+        host.to_string()
+    } else {
+        format!("http://{}", host)
+    }
+}
+
+fn api_key_for_host(host_override: Option<&str>, normalized_host: &str) -> Result<String> {
+    if host_override.is_some() && is_local_host(normalized_host) {
+        return config::get_local_api_key();
+    }
+    config::get_api_key()
+}
+
+fn is_local_host(host: &str) -> bool {
+    let without_scheme = host
+        .strip_prefix("http://")
+        .or_else(|| host.strip_prefix("https://"))
+        .unwrap_or(host);
+    let authority = without_scheme
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(without_scheme)
+        .rsplit_once('@')
+        .map(|(_, authority)| authority)
+        .unwrap_or(without_scheme);
+    let hostname = host_name(authority);
+
+    matches!(hostname, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn host_name(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((ipv6_host, _)) = rest.split_once(']') else {
+            return authority;
+        };
+        return ipv6_host;
+    }
+    authority
+        .split_once(':')
+        .map(|(hostname, _)| hostname)
+        .unwrap_or(authority)
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -408,26 +444,39 @@ fn print_pending_devices(devices: &serde_json::Value) {
 }
 
 fn print_pending_folders(folders: &serde_json::Value) {
-    let Some(flds) = folders.as_object() else {
-        println!("  (none)");
-        return;
-    };
-    if flds.is_empty() {
+    let lines = pending_folder_lines(folders);
+    if lines.is_empty() {
         println!("  (none)");
         return;
     }
-    for (device_id, device_folders) in flds {
-        let Some(folders) = device_folders.as_object() else {
+    for line in lines {
+        println!("  {}", line);
+    }
+}
+
+fn pending_folder_lines(folders: &serde_json::Value) -> Vec<String> {
+    let Some(flds) = folders.as_object() else {
+        return Vec::new();
+    };
+
+    let mut lines = Vec::new();
+    for (folder_id, info) in flds {
+        let Some(offered_by) = info.get("offeredBy").and_then(|o| o.as_object()) else {
             continue;
         };
-        for (folder_id, info) in folders {
-            let label = info
+        for (device_id, offer) in offered_by {
+            let label = offer
                 .get("label")
                 .and_then(|l| l.as_str())
                 .unwrap_or(folder_id);
-            println!("  {} from {}", label, &device_id[..7.min(device_id.len())]);
+            lines.push(format!(
+                "{} from {}",
+                label,
+                &device_id[..7.min(device_id.len())]
+            ));
         }
     }
+    lines
 }
 
 async fn cmd_restart(client: api::Client) -> Result<()> {
@@ -487,5 +536,49 @@ async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<
         Commands::Shutdown => cmd_shutdown(client).await,
         Commands::Events { limit } => cmd_events(client, limit).await,
         Commands::Config { .. } => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pending_folder_lines_reads_syncthing_offered_by_shape() {
+        let folders = json!({
+            "wow-install": {
+                "offeredBy": {
+                    "3NF6RRU-U3MGBPO-ITEFILB-YYWGIYA-X3M3CQD-T6XIAGH-4OZEQ5I-MJC5RQ7": {
+                        "label": "World of Warcraft Install",
+                        "receiveEncrypted": false,
+                        "remoteEncrypted": false
+                    }
+                }
+            }
+        });
+
+        assert_eq!(
+            pending_folder_lines(&folders),
+            vec!["World of Warcraft Install from 3NF6RRU"]
+        );
+    }
+
+    #[test]
+    fn pending_folder_lines_returns_empty_for_no_pending_folders() {
+        assert!(pending_folder_lines(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn is_local_host_accepts_common_loopback_forms() {
+        assert!(is_local_host("http://localhost:8384"));
+        assert!(is_local_host("127.0.0.1:8384"));
+        assert!(is_local_host("http://[::1]:8384"));
+    }
+
+    #[test]
+    fn is_local_host_rejects_remote_hosts() {
+        assert!(!is_local_host("http://192.168.2.32:8384"));
+        assert!(!is_local_host("talos:8384"));
     }
 }

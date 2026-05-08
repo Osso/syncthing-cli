@@ -55,6 +55,10 @@ pub fn get_api_key() -> Result<String> {
     }
 
     // Fall back to reading from syncthing's config.xml
+    get_local_api_key()
+}
+
+pub fn get_local_api_key() -> Result<String> {
     let st_config = syncthing_config_path();
     extract_api_key_from_path(&st_config)
 }
