@@ -61,6 +61,29 @@ impl Client {
         }
     }
 
+    async fn patch(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let resp = self
+            .http
+            .patch(&url)
+            .header("X-API-Key", &self.api_key)
+            .json(body)
+            .send()
+            .await
+            .context("Failed to send request")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("API error: {}", resp.status());
+        }
+
+        let text = resp.text().await?;
+        if text.is_empty() {
+            Ok(Value::Null)
+        } else {
+            serde_json::from_str(&text).context("Failed to parse response")
+        }
+    }
+
     // System endpoints
     pub async fn status(&self) -> Result<Value> {
         self.get("/rest/system/status").await
@@ -101,6 +124,22 @@ impl Client {
 
     pub async fn config_devices(&self) -> Result<Value> {
         self.get("/rest/config/devices").await
+    }
+
+    pub async fn set_device_paused(&self, device_id: &str, paused: bool) -> Result<Value> {
+        let body = serde_json::json!({ "paused": paused });
+        self.patch(&format!("/rest/config/devices/{}", device_id), &body)
+            .await
+    }
+
+    pub async fn set_device_addresses(
+        &self,
+        device_id: &str,
+        addresses: Vec<String>,
+    ) -> Result<Value> {
+        let body = serde_json::json!({ "addresses": addresses });
+        self.patch(&format!("/rest/config/devices/{}", device_id), &body)
+            .await
     }
 
     // Database endpoints

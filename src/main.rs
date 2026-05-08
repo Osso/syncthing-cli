@@ -29,6 +29,22 @@ enum Commands {
     },
     /// List connected devices
     Devices,
+    /// Pause a device (or all devices)
+    Pause {
+        /// Device name or ID (full or short prefix)
+        device: Option<String>,
+        /// Pause all devices
+        #[arg(long)]
+        all: bool,
+    },
+    /// Unpause a device (or all devices)
+    Unpause {
+        /// Device name or ID (full or short prefix)
+        device: Option<String>,
+        /// Unpause all paused devices
+        #[arg(long)]
+        all: bool,
+    },
     /// Trigger folder rescan
     Scan {
         /// Folder ID (rescan all if not specified)
@@ -353,6 +369,103 @@ async fn cmd_devices(client: api::Client) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_set_paused(
+    client: api::Client,
+    device: Option<String>,
+    all: bool,
+    paused: bool,
+) -> Result<()> {
+    let devices = client.config_devices().await?;
+    let devices = devices
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("unexpected /rest/config/devices response"))?;
+
+    let targets = select_devices(devices, device.as_deref(), all, paused)?;
+
+    if targets.is_empty() {
+        let action = if paused { "pause" } else { "unpause" };
+        println!("No devices to {}", action);
+        return Ok(());
+    }
+
+    for (id, name) in &targets {
+        client.set_device_paused(id, paused).await?;
+        let verb = if paused { "paused" } else { "unpaused" };
+        println!("{} {} ({})", verb, name, &id[..7.min(id.len())]);
+    }
+    Ok(())
+}
+
+fn select_devices(
+    devices: &[serde_json::Value],
+    query: Option<&str>,
+    all: bool,
+    target_paused: bool,
+) -> Result<Vec<(String, String)>> {
+    if all && query.is_some() {
+        anyhow::bail!("specify either a device or --all, not both");
+    }
+
+    if all {
+        let current_paused = !target_paused;
+        return Ok(devices
+            .iter()
+            .filter(|d| {
+                d.get("paused")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false)
+                    == current_paused
+            })
+            .filter_map(device_id_and_name)
+            .collect());
+    }
+
+    let Some(query) = query else {
+        anyhow::bail!("specify a device name/ID or --all");
+    };
+
+    let matches: Vec<(String, String)> = devices
+        .iter()
+        .filter(|d| device_matches(d, query))
+        .filter_map(device_id_and_name)
+        .collect();
+
+    if matches.is_empty() {
+        anyhow::bail!("no device matched '{}'", query);
+    }
+    if matches.len() > 1 {
+        let names: Vec<String> = matches.into_iter().map(|(_, n)| n).collect();
+        anyhow::bail!(
+            "'{}' matched multiple devices: {}",
+            query,
+            names.join(", ")
+        );
+    }
+    Ok(matches)
+}
+
+fn device_id_and_name(device: &serde_json::Value) -> Option<(String, String)> {
+    let id = device.get("deviceID").and_then(|i| i.as_str())?;
+    let name = device
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or(id)
+        .to_string();
+    Some((id.to_string(), name))
+}
+
+fn device_matches(device: &serde_json::Value, query: &str) -> bool {
+    let q = query.to_lowercase();
+    let id = device
+        .get("deviceID")
+        .and_then(|i| i.as_str())
+        .unwrap_or("");
+    let name = device.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    name.eq_ignore_ascii_case(query)
+        || id.eq_ignore_ascii_case(query)
+        || id.to_lowercase().starts_with(&q)
+}
+
 async fn cmd_scan(client: api::Client, folder: Option<String>) -> Result<()> {
     if let Some(f) = folder {
         client.db_scan(&f).await?;
@@ -529,6 +642,8 @@ async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<
         Commands::Status => cmd_status(client).await,
         Commands::Folders { id } => cmd_folders(client, id).await,
         Commands::Devices => cmd_devices(client).await,
+        Commands::Pause { device, all } => cmd_set_paused(client, device, all, true).await,
+        Commands::Unpause { device, all } => cmd_set_paused(client, device, all, false).await,
         Commands::Scan { folder } => cmd_scan(client, folder).await,
         Commands::Errors { folder, clear } => cmd_errors(client, folder, clear).await,
         Commands::Pending => cmd_pending(client).await,
@@ -580,5 +695,66 @@ mod tests {
     fn is_local_host_rejects_remote_hosts() {
         assert!(!is_local_host("http://192.168.2.32:8384"));
         assert!(!is_local_host("talos:8384"));
+    }
+
+    fn sample_devices() -> Vec<serde_json::Value> {
+        vec![
+            json!({"deviceID": "AAAAAAA-BBBB", "name": "talos", "paused": true}),
+            json!({"deviceID": "CCCCCCC-DDDD", "name": "alessio-desktop", "paused": false}),
+            json!({"deviceID": "EEEEEEE-FFFF", "name": "aso", "paused": true}),
+        ]
+    }
+
+    #[test]
+    fn select_devices_all_unpause_returns_only_paused() {
+        let devs = sample_devices();
+        let selected = select_devices(&devs, None, true, false).unwrap();
+        let names: Vec<&str> = selected.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, vec!["talos", "aso"]);
+    }
+
+    #[test]
+    fn select_devices_all_pause_returns_only_unpaused() {
+        let devs = sample_devices();
+        let selected = select_devices(&devs, None, true, true).unwrap();
+        let names: Vec<&str> = selected.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, vec!["alessio-desktop"]);
+    }
+
+    #[test]
+    fn select_devices_matches_by_name_case_insensitive() {
+        let devs = sample_devices();
+        let selected = select_devices(&devs, Some("Talos"), false, false).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1, "talos");
+    }
+
+    #[test]
+    fn select_devices_matches_by_id_prefix() {
+        let devs = sample_devices();
+        let selected = select_devices(&devs, Some("ccccccc"), false, false).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].1, "alessio-desktop");
+    }
+
+    #[test]
+    fn select_devices_errors_when_no_match() {
+        let devs = sample_devices();
+        let err = select_devices(&devs, Some("nope"), false, false).unwrap_err();
+        assert!(err.to_string().contains("no device matched"));
+    }
+
+    #[test]
+    fn select_devices_errors_when_all_and_query_combined() {
+        let devs = sample_devices();
+        let err = select_devices(&devs, Some("talos"), true, false).unwrap_err();
+        assert!(err.to_string().contains("either a device or --all"));
+    }
+
+    #[test]
+    fn select_devices_errors_when_neither_all_nor_query() {
+        let devs = sample_devices();
+        let err = select_devices(&devs, None, false, false).unwrap_err();
+        assert!(err.to_string().contains("specify a device"));
     }
 }
