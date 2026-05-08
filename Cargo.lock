@@ -1360,7 +1360,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "syncthing"
+name = "syncthing-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -150,6 +150,13 @@ async fn cmd_status(client: api::Client) -> Result<()> {
     let version = client.version().await?;
     let completion = client.db_completion().await?;
 
+    print_version(&version);
+    print_status_stats(&status);
+    print_completion_stats(&completion);
+    Ok(())
+}
+
+fn print_version(version: &serde_json::Value) {
     println!(
         "Syncthing {}",
         version
@@ -158,7 +165,9 @@ async fn cmd_status(client: api::Client) -> Result<()> {
             .unwrap_or("unknown")
     );
     println!();
+}
 
+fn print_status_stats(status: &serde_json::Value) {
     let uptime = status.get("uptime").and_then(|u| u.as_u64()).unwrap_or(0);
     let hours = uptime / 3600;
     let mins = (uptime % 3600) / 60;
@@ -167,7 +176,9 @@ async fn cmd_status(client: api::Client) -> Result<()> {
     let alloc = status.get("alloc").and_then(|a| a.as_u64()).unwrap_or(0);
     let sys = status.get("sys").and_then(|s| s.as_u64()).unwrap_or(0);
     println!("Memory: {} / {}", format_bytes(alloc), format_bytes(sys));
+}
 
+fn print_completion_stats(completion: &serde_json::Value) {
     let global_bytes = completion
         .get("globalBytes")
         .and_then(|b| b.as_u64())
@@ -187,72 +198,85 @@ async fn cmd_status(client: api::Client) -> Result<()> {
     if need_bytes > 0 {
         println!("Need: {}", format_bytes(need_bytes));
     }
-    Ok(())
 }
 
 async fn cmd_folders(client: api::Client, id: Option<String>) -> Result<()> {
     if let Some(folder_id) = id {
-        let status = client.db_status(&folder_id).await?;
-        println!("{}", serde_json::to_string_pretty(&status)?);
-    } else {
-        let folders = client.config_folders().await?;
+        return print_folder_detail(&client, &folder_id).await;
+    }
+    print_folder_overview(&client).await
+}
 
-        if let Some(folders) = folders.as_array() {
-            for folder in folders {
-                let id = folder.get("id").and_then(|i| i.as_str()).unwrap_or("?");
-                let label = folder
-                    .get("label")
-                    .and_then(|l| l.as_str())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(id);
-                let paused = folder
-                    .get("paused")
-                    .and_then(|p| p.as_bool())
-                    .unwrap_or(false);
+async fn print_folder_detail(client: &api::Client, folder_id: &str) -> Result<()> {
+    let status = client.db_status(folder_id).await?;
+    println!("{}", serde_json::to_string_pretty(&status)?);
+    Ok(())
+}
 
-                if paused {
-                    println!("{:<20} paused", label);
-                    continue;
-                }
-
-                match client.db_status(id).await {
-                    Ok(status) => {
-                        let state = status
-                            .get("state")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("unknown");
-                        let need_files = status
-                            .get("needFiles")
-                            .and_then(|n| n.as_u64())
-                            .unwrap_or(0);
-                        let need_bytes = status
-                            .get("needBytes")
-                            .and_then(|n| n.as_u64())
-                            .unwrap_or(0);
-                        let errors = status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
-
-                        let mut status_parts = vec![state.to_string()];
-                        if need_files > 0 {
-                            status_parts.push(format!(
-                                "{} files ({})",
-                                need_files,
-                                format_bytes(need_bytes)
-                            ));
-                        }
-                        if errors > 0 {
-                            status_parts.push(format!("{} errors", errors));
-                        }
-
-                        println!("{:<20} {}", label, status_parts.join(", "));
-                    }
-                    Err(_) => {
-                        println!("{:<20} (status unavailable)", label);
-                    }
-                }
-            }
-        }
+async fn print_folder_overview(client: &api::Client) -> Result<()> {
+    let folders = client.config_folders().await?;
+    let Some(folders) = folders.as_array() else {
+        return Ok(());
+    };
+    for folder in folders {
+        print_folder_line(client, folder).await;
     }
     Ok(())
+}
+
+async fn print_folder_line(client: &api::Client, folder: &serde_json::Value) {
+    let id = folder.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+    let label = folder
+        .get("label")
+        .and_then(|l| l.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(id);
+
+    if folder
+        .get("paused")
+        .and_then(|p| p.as_bool())
+        .unwrap_or(false)
+    {
+        println!("{:<20} paused", label);
+        return;
+    }
+
+    let Ok(status) = client.db_status(id).await else {
+        println!("{:<20} (status unavailable)", label);
+        return;
+    };
+
+    let status_line = build_folder_status_line(&status);
+    println!("{:<20} {}", label, status_line);
+}
+
+fn build_folder_status_line(status: &serde_json::Value) -> String {
+    let state = status
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown");
+    let need_files = status
+        .get("needFiles")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+    let need_bytes = status
+        .get("needBytes")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
+    let errors = status.get("errors").and_then(|e| e.as_u64()).unwrap_or(0);
+
+    let mut status_parts = vec![state.to_string()];
+    if need_files > 0 {
+        status_parts.push(format!(
+            "{} files ({})",
+            need_files,
+            format_bytes(need_bytes)
+        ));
+    }
+    if errors > 0 {
+        status_parts.push(format!("{} errors", errors));
+    }
+    status_parts.join(", ")
 }
 
 async fn cmd_devices(client: api::Client) -> Result<()> {
@@ -308,36 +332,47 @@ async fn cmd_errors(client: api::Client, folder: Option<String>, clear: bool) ->
     if clear {
         client.clear_errors().await?;
         println!("Errors cleared");
-    } else if let Some(folder_id) = folder {
-        let errors = client.folder_errors(&folder_id).await?;
-        if let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) {
-            if errs.is_empty() {
-                println!("No errors for folder '{}'", folder_id);
-            } else {
-                for err in errs {
-                    let path = err.get("path").and_then(|p| p.as_str()).unwrap_or("?");
-                    let error = err.get("error").and_then(|e| e.as_str()).unwrap_or("?");
-                    println!("{}: {}", path, error);
-                }
-            }
-        } else {
-            println!("No errors for folder '{}'", folder_id);
-        }
-    } else {
-        let errors = client.errors().await?;
-        if let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) {
-            if errs.is_empty() {
-                println!("No errors");
-            } else {
-                for err in errs {
-                    let when = err.get("when").and_then(|w| w.as_str()).unwrap_or("?");
-                    let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("?");
-                    println!("[{}] {}", format_duration_since(when), msg);
-                }
-            }
-        } else {
-            println!("No errors");
-        }
+        return Ok(());
+    }
+    if let Some(folder_id) = folder {
+        return print_folder_errors(&client, &folder_id).await;
+    }
+    print_global_errors(&client).await?;
+    Ok(())
+}
+
+async fn print_folder_errors(client: &api::Client, folder_id: &str) -> Result<()> {
+    let errors = client.folder_errors(folder_id).await?;
+    let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) else {
+        println!("No errors for folder '{}'", folder_id);
+        return Ok(());
+    };
+    if errs.is_empty() {
+        println!("No errors for folder '{}'", folder_id);
+        return Ok(());
+    }
+    for err in errs {
+        let path = err.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+        let error = err.get("error").and_then(|e| e.as_str()).unwrap_or("?");
+        println!("{}: {}", path, error);
+    }
+    Ok(())
+}
+
+async fn print_global_errors(client: &api::Client) -> Result<()> {
+    let errors = client.errors().await?;
+    let Some(errs) = errors.get("errors").and_then(|e| e.as_array()) else {
+        println!("No errors");
+        return Ok(());
+    };
+    if errs.is_empty() {
+        println!("No errors");
+        return Ok(());
+    }
+    for err in errs {
+        let when = err.get("when").and_then(|w| w.as_str()).unwrap_or("?");
+        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("?");
+        println!("[{}] {}", format_duration_since(when), msg);
     }
     Ok(())
 }
@@ -347,39 +382,52 @@ async fn cmd_pending(client: api::Client) -> Result<()> {
     let folders = client.pending_folders().await?;
 
     println!("Pending Devices:");
-    if let Some(devs) = devices.as_object() {
-        if devs.is_empty() {
-            println!("  (none)");
-        } else {
-            for (id, info) in devs {
-                let name = info
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("unknown");
-                println!("  {} ({})", name, &id[..7.min(id.len())]);
-            }
-        }
-    }
+    print_pending_devices(&devices);
 
     println!("\nPending Folders:");
-    if let Some(flds) = folders.as_object() {
-        if flds.is_empty() {
-            println!("  (none)");
-        } else {
-            for (device_id, device_folders) in flds {
-                if let Some(folders) = device_folders.as_object() {
-                    for (folder_id, info) in folders {
-                        let label = info
-                            .get("label")
-                            .and_then(|l| l.as_str())
-                            .unwrap_or(folder_id);
-                        println!("  {} from {}", label, &device_id[..7.min(device_id.len())]);
-                    }
-                }
-            }
+    print_pending_folders(&folders);
+    Ok(())
+}
+
+fn print_pending_devices(devices: &serde_json::Value) {
+    let Some(devs) = devices.as_object() else {
+        println!("  (none)");
+        return;
+    };
+    if devs.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for (id, info) in devs {
+        let name = info
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown");
+        println!("  {} ({})", name, &id[..7.min(id.len())]);
+    }
+}
+
+fn print_pending_folders(folders: &serde_json::Value) {
+    let Some(flds) = folders.as_object() else {
+        println!("  (none)");
+        return;
+    };
+    if flds.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for (device_id, device_folders) in flds {
+        let Some(folders) = device_folders.as_object() else {
+            continue;
+        };
+        for (folder_id, info) in folders {
+            let label = info
+                .get("label")
+                .and_then(|l| l.as_str())
+                .unwrap_or(folder_id);
+            println!("  {} from {}", label, &device_id[..7.min(device_id.len())]);
         }
     }
-    Ok(())
 }
 
 async fn cmd_restart(client: api::Client) -> Result<()> {
@@ -412,22 +460,32 @@ async fn cmd_events(client: api::Client, limit: u32) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    run(cli).await
+}
+
+async fn run(cli: Cli) -> Result<()> {
     let host_override = cli.host.as_deref();
 
     match cli.command {
-        Commands::Config { api_key, host } => cmd_config(api_key, host).await?,
-        Commands::Status => cmd_status(get_client(host_override)?).await?,
-        Commands::Folders { id } => cmd_folders(get_client(host_override)?, id).await?,
-        Commands::Devices => cmd_devices(get_client(host_override)?).await?,
-        Commands::Scan { folder } => cmd_scan(get_client(host_override)?, folder).await?,
-        Commands::Errors { folder, clear } => {
-            cmd_errors(get_client(host_override)?, folder, clear).await?
+        Commands::Config { api_key, host } => cmd_config(api_key, host).await,
+        command => {
+            let client = get_client(host_override)?;
+            dispatch_with_client(client, command).await
         }
-        Commands::Pending => cmd_pending(get_client(host_override)?).await?,
-        Commands::Restart => cmd_restart(get_client(host_override)?).await?,
-        Commands::Shutdown => cmd_shutdown(get_client(host_override)?).await?,
-        Commands::Events { limit } => cmd_events(get_client(host_override)?, limit).await?,
     }
+}
 
-    Ok(())
+async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<()> {
+    match command {
+        Commands::Status => cmd_status(client).await,
+        Commands::Folders { id } => cmd_folders(client, id).await,
+        Commands::Devices => cmd_devices(client).await,
+        Commands::Scan { folder } => cmd_scan(client, folder).await,
+        Commands::Errors { folder, clear } => cmd_errors(client, folder, clear).await,
+        Commands::Pending => cmd_pending(client).await,
+        Commands::Restart => cmd_restart(client).await,
+        Commands::Shutdown => cmd_shutdown(client).await,
+        Commands::Events { limit } => cmd_events(client, limit).await,
+        Commands::Config { .. } => Ok(()),
+    }
 }
