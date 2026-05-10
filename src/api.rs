@@ -52,13 +52,7 @@ impl Client {
             anyhow::bail!("API error: {}", resp.status());
         }
 
-        // Some POST endpoints return empty response
-        let text = resp.text().await?;
-        if text.is_empty() {
-            Ok(Value::Null)
-        } else {
-            serde_json::from_str(&text).context("Failed to parse response")
-        }
+        parse_response_body(resp).await
     }
 
     async fn patch(&self, endpoint: &str, body: &Value) -> Result<Value> {
@@ -76,12 +70,42 @@ impl Client {
             anyhow::bail!("API error: {}", resp.status());
         }
 
-        let text = resp.text().await?;
-        if text.is_empty() {
-            Ok(Value::Null)
-        } else {
-            serde_json::from_str(&text).context("Failed to parse response")
+        parse_response_body(resp).await
+    }
+
+    async fn put(&self, endpoint: &str, body: &Value) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let resp = self
+            .http
+            .put(&url)
+            .header("X-API-Key", &self.api_key)
+            .json(body)
+            .send()
+            .await
+            .context("Failed to send request")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("API error: {}", resp.status());
         }
+
+        parse_response_body(resp).await
+    }
+
+    async fn delete(&self, endpoint: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let resp = self
+            .http
+            .delete(&url)
+            .header("X-API-Key", &self.api_key)
+            .send()
+            .await
+            .context("Failed to send request")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("API error: {}", resp.status());
+        }
+
+        parse_response_body(resp).await
     }
 
     // System endpoints
@@ -122,8 +146,23 @@ impl Client {
         self.get("/rest/config/folders").await
     }
 
+    pub async fn config_folder(&self, folder_id: &str) -> Result<Value> {
+        self.get(&format!("/rest/config/folders/{}", folder_id))
+            .await
+    }
+
     pub async fn config_devices(&self) -> Result<Value> {
         self.get("/rest/config/devices").await
+    }
+
+    pub async fn put_config_folder(&self, folder_id: &str, folder: &Value) -> Result<Value> {
+        self.put(&format!("/rest/config/folders/{}", folder_id), folder)
+            .await
+    }
+
+    pub async fn delete_config_folder(&self, folder_id: &str) -> Result<Value> {
+        self.delete(&format!("/rest/config/folders/{}", folder_id))
+            .await
     }
 
     pub async fn set_device_paused(&self, device_id: &str, paused: bool) -> Result<Value> {
@@ -204,6 +243,15 @@ impl Client {
             url.push_str(&params.join("&"));
         }
         self.get(&url).await
+    }
+}
+
+async fn parse_response_body(resp: reqwest::Response) -> Result<Value> {
+    let text = resp.text().await?;
+    if text.is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&text).context("Failed to parse response")
     }
 }
 
@@ -386,5 +434,48 @@ mod tests {
         let result = client.pending_devices().await.unwrap();
 
         assert!(result.as_object().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_put_config_folder() {
+        let mock_server = MockServer::start().await;
+        let body = serde_json::json!({
+            "id": "agent-config",
+            "label": "agent-config",
+            "path": "~/agent-config",
+            "devices": [{"deviceID": "ABC123"}]
+        });
+
+        Mock::given(method("PUT"))
+            .and(path("/rest/config/folders/agent-config"))
+            .and(header("X-API-Key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client
+            .put_config_folder("agent-config", &body)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn test_delete_config_folder() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/rest/config/folders/agent-config"))
+            .and(header("X-API-Key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.delete_config_folder("agent-config").await.unwrap();
+
+        assert_eq!(result, Value::Null);
     }
 }

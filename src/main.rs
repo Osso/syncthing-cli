@@ -29,6 +29,11 @@ enum Commands {
     },
     /// List connected devices
     Devices,
+    /// Manage folder configuration
+    Folder {
+        #[command(subcommand)]
+        command: FolderCommands,
+    },
     /// Pause a device (or all devices)
     Pause {
         /// Device name or ID (full or short prefix)
@@ -79,6 +84,37 @@ enum Commands {
         /// Host URL (e.g., http://localhost:8384)
         #[arg(long)]
         host: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCommands {
+    /// Add a new folder and share it with devices
+    Add {
+        /// Folder ID
+        id: String,
+        /// Folder path on this Syncthing host
+        #[arg(long)]
+        path: String,
+        /// Display label (defaults to folder ID)
+        #[arg(long)]
+        label: Option<String>,
+        /// Device name or ID to share with; repeat for multiple devices
+        #[arg(short, long = "device")]
+        devices: Vec<String>,
+    },
+    /// Share an existing folder with devices
+    Share {
+        /// Folder ID
+        id: String,
+        /// Device name or ID to share with; repeat for multiple devices
+        #[arg(short, long = "device")]
+        devices: Vec<String>,
+    },
+    /// Remove a folder from this Syncthing host configuration
+    Remove {
+        /// Folder ID
+        id: String,
     },
 }
 
@@ -396,6 +432,228 @@ async fn cmd_set_paused(
     Ok(())
 }
 
+async fn cmd_folder(client: api::Client, command: FolderCommands) -> Result<()> {
+    match command {
+        FolderCommands::Add {
+            id,
+            path,
+            label,
+            devices,
+        } => cmd_folder_add(client, id, path, label, devices).await,
+        FolderCommands::Share { id, devices } => cmd_folder_share(client, id, devices).await,
+        FolderCommands::Remove { id } => cmd_folder_remove(client, id).await,
+    }
+}
+
+async fn cmd_folder_add(
+    client: api::Client,
+    id: String,
+    path: String,
+    label: Option<String>,
+    devices: Vec<String>,
+) -> Result<()> {
+    let mut selected_devices = resolve_devices(&client, &devices).await?;
+    include_current_device(&client, &mut selected_devices).await?;
+    let label = label.unwrap_or_else(|| id.clone());
+    let folder = build_folder_config(&id, &label, &path, &selected_devices);
+
+    client.put_config_folder(&id, &folder).await?;
+    println!(
+        "added folder {} at {} shared with {}",
+        id,
+        path,
+        device_names(&selected_devices)
+    );
+    Ok(())
+}
+
+async fn include_current_device(
+    client: &api::Client,
+    devices: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let status = client.status().await?;
+    let Some(device_id) = status.get("myID").and_then(|id| id.as_str()) else {
+        return Ok(());
+    };
+
+    let current_device = find_current_device(client, device_id).await?;
+    add_device_if_missing(devices, current_device);
+    Ok(())
+}
+
+async fn find_current_device(client: &api::Client, device_id: &str) -> Result<(String, String)> {
+    let devices = client.config_devices().await?;
+    let configured_devices = devices
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("unexpected /rest/config/devices response"))?;
+
+    let device = configured_devices
+        .iter()
+        .find(|device| device.get("deviceID").and_then(|id| id.as_str()) == Some(device_id));
+    let name = device
+        .and_then(|device| device.get("name"))
+        .and_then(|name| name.as_str())
+        .unwrap_or("this-device");
+    Ok((device_id.to_string(), name.to_string()))
+}
+
+fn add_device_if_missing(devices: &mut Vec<(String, String)>, device: (String, String)) {
+    let already_selected = devices.iter().any(|(device_id, _)| device_id == &device.0);
+    if !already_selected {
+        devices.push(device);
+    }
+}
+
+async fn cmd_folder_share(client: api::Client, id: String, devices: Vec<String>) -> Result<()> {
+    let selected_devices = resolve_devices(&client, &devices).await?;
+    let mut folder = client.config_folder(&id).await?;
+
+    add_devices_to_folder(&mut folder, &selected_devices)?;
+    client.put_config_folder(&id, &folder).await?;
+    println!(
+        "shared folder {} with {}",
+        id,
+        device_names(&selected_devices)
+    );
+    Ok(())
+}
+
+async fn cmd_folder_remove(client: api::Client, id: String) -> Result<()> {
+    client.delete_config_folder(&id).await?;
+    println!("removed folder {}", id);
+    Ok(())
+}
+
+async fn resolve_devices(
+    client: &api::Client,
+    queries: &[String],
+) -> Result<Vec<(String, String)>> {
+    if queries.is_empty() {
+        anyhow::bail!("specify at least one --device");
+    }
+
+    let devices = client.config_devices().await?;
+    let devices = devices
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("unexpected /rest/config/devices response"))?;
+
+    let mut selected = Vec::new();
+    for query in queries {
+        selected.extend(select_devices(devices, Some(query), false, false)?);
+    }
+    Ok(selected)
+}
+
+fn build_folder_config(
+    id: &str,
+    label: &str,
+    path: &str,
+    devices: &[(String, String)],
+) -> serde_json::Value {
+    let min_disk_free = serde_json::json!({"value": 1, "unit": "%"});
+    let versioning = serde_json::json!({
+        "type": "",
+        "params": {},
+        "cleanupIntervalS": 3600,
+        "fsPath": "",
+        "fsType": "basic"
+    });
+    let xattr_filter = serde_json::json!({
+        "entries": [],
+        "maxSingleEntrySize": 1024,
+        "maxTotalSize": 4096
+    });
+
+    serde_json::json!({
+        "id": id,
+        "label": label,
+        "filesystemType": "basic",
+        "path": path,
+        "type": "sendreceive",
+        "devices": folder_device_configs(devices),
+        "rescanIntervalS": 3600,
+        "fsWatcherEnabled": true,
+        "fsWatcherDelayS": 10,
+        "fsWatcherTimeoutS": 0,
+        "ignorePerms": false,
+        "autoNormalize": true,
+        "minDiskFree": min_disk_free,
+        "versioning": versioning,
+        "copiers": 0,
+        "pullerMaxPendingKiB": 0,
+        "hashers": 0,
+        "order": "random",
+        "ignoreDelete": false,
+        "scanProgressIntervalS": 0,
+        "pullerPauseS": 0,
+        "maxConflicts": 10,
+        "disableSparseFiles": false,
+        "disableTempIndexes": false,
+        "paused": false,
+        "weakHashThresholdPct": 25,
+        "markerName": ".stfolder",
+        "copyOwnershipFromParent": false,
+        "modTimeWindowS": 0,
+        "maxConcurrentWrites": 2,
+        "disableFsync": false,
+        "blockPullOrder": "standard",
+        "copyRangeMethod": "standard",
+        "caseSensitiveFS": false,
+        "junctionsAsDirs": false,
+        "syncOwnership": false,
+        "sendOwnership": false,
+        "syncXattrs": false,
+        "sendXattrs": false,
+        "xattrFilter": xattr_filter
+    })
+}
+
+fn folder_device_configs(devices: &[(String, String)]) -> Vec<serde_json::Value> {
+    devices
+        .iter()
+        .map(|(device_id, _)| {
+            serde_json::json!({
+                "deviceID": device_id,
+                "introducedBy": "",
+                "encryptionPassword": ""
+            })
+        })
+        .collect()
+}
+
+fn add_devices_to_folder(
+    folder: &mut serde_json::Value,
+    devices: &[(String, String)],
+) -> Result<()> {
+    let existing_devices = folder
+        .get_mut("devices")
+        .and_then(|devices| devices.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("folder config has no devices array"))?;
+
+    for (device_id, _) in devices {
+        let already_shared = existing_devices
+            .iter()
+            .any(|device| device.get("deviceID").and_then(|id| id.as_str()) == Some(device_id));
+        if already_shared {
+            continue;
+        }
+        existing_devices.push(serde_json::json!({
+            "deviceID": device_id,
+            "introducedBy": "",
+            "encryptionPassword": ""
+        }));
+    }
+    Ok(())
+}
+
+fn device_names(devices: &[(String, String)]) -> String {
+    devices
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn select_devices(
     devices: &[serde_json::Value],
     query: Option<&str>,
@@ -411,10 +669,7 @@ fn select_devices(
         return Ok(devices
             .iter()
             .filter(|d| {
-                d.get("paused")
-                    .and_then(|p| p.as_bool())
-                    .unwrap_or(false)
-                    == current_paused
+                d.get("paused").and_then(|p| p.as_bool()).unwrap_or(false) == current_paused
             })
             .filter_map(device_id_and_name)
             .collect());
@@ -435,11 +690,7 @@ fn select_devices(
     }
     if matches.len() > 1 {
         let names: Vec<String> = matches.into_iter().map(|(_, n)| n).collect();
-        anyhow::bail!(
-            "'{}' matched multiple devices: {}",
-            query,
-            names.join(", ")
-        );
+        anyhow::bail!("'{}' matched multiple devices: {}", query, names.join(", "));
     }
     Ok(matches)
 }
@@ -642,6 +893,7 @@ async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<
         Commands::Status => cmd_status(client).await,
         Commands::Folders { id } => cmd_folders(client, id).await,
         Commands::Devices => cmd_devices(client).await,
+        Commands::Folder { command } => cmd_folder(client, command).await,
         Commands::Pause { device, all } => cmd_set_paused(client, device, all, true).await,
         Commands::Unpause { device, all } => cmd_set_paused(client, device, all, false).await,
         Commands::Scan { folder } => cmd_scan(client, folder).await,
@@ -756,5 +1008,59 @@ mod tests {
         let devs = sample_devices();
         let err = select_devices(&devs, None, false, false).unwrap_err();
         assert!(err.to_string().contains("specify a device"));
+    }
+
+    #[test]
+    fn build_folder_config_includes_devices_and_defaults() {
+        let devices = vec![("CCCCCCC-DDDD".to_string(), "alessio-desktop".to_string())];
+        let folder =
+            build_folder_config("agent-config", "Agent Config", "~/agent-config", &devices);
+
+        assert_eq!(folder["id"], "agent-config");
+        assert_eq!(folder["label"], "Agent Config");
+        assert_eq!(folder["path"], "~/agent-config");
+        assert_eq!(folder["type"], "sendreceive");
+        assert_eq!(folder["devices"][0]["deviceID"], "CCCCCCC-DDDD");
+        assert_eq!(folder["rescanIntervalS"], 3600);
+        assert_eq!(folder["fsWatcherEnabled"], true);
+    }
+
+    #[test]
+    fn add_devices_to_folder_preserves_existing_and_skips_duplicates() {
+        let mut folder = json!({
+            "id": "agent-config",
+            "devices": [{"deviceID": "AAAAAAA-BBBB"}]
+        });
+        let devices = vec![
+            ("AAAAAAA-BBBB".to_string(), "talos".to_string()),
+            ("CCCCCCC-DDDD".to_string(), "alessio-desktop".to_string()),
+        ];
+
+        add_devices_to_folder(&mut folder, &devices).unwrap();
+
+        let device_ids: Vec<&str> = folder["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|device| device["deviceID"].as_str().unwrap())
+            .collect();
+        assert_eq!(device_ids, vec!["AAAAAAA-BBBB", "CCCCCCC-DDDD"]);
+    }
+
+    #[test]
+    fn add_device_if_missing_appends_only_new_devices() {
+        let mut devices = vec![("AAAAAAA-BBBB".to_string(), "talos".to_string())];
+
+        add_device_if_missing(
+            &mut devices,
+            ("AAAAAAA-BBBB".to_string(), "talos-duplicate".to_string()),
+        );
+        add_device_if_missing(
+            &mut devices,
+            ("CCCCCCC-DDDD".to_string(), "alessio-desktop".to_string()),
+        );
+
+        let names: Vec<&str> = devices.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(names, vec!["talos", "alessio-desktop"]);
     }
 }
