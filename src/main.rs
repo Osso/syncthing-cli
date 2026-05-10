@@ -123,7 +123,7 @@ fn get_client(host_override: Option<&str>) -> Result<api::Client> {
     let host = host_override
         .map(normalize_host)
         .unwrap_or_else(|| cfg.host().to_string());
-    let api_key = api_key_for_host(host_override, &host)?;
+    let api_key = api_key_for_host(&host)?;
 
     api::Client::new(&api_key, &host)
 }
@@ -136,11 +136,15 @@ fn normalize_host(host: &str) -> String {
     }
 }
 
-fn api_key_for_host(host_override: Option<&str>, normalized_host: &str) -> Result<String> {
-    if host_override.is_some() && is_local_host(normalized_host) {
+fn api_key_for_host(normalized_host: &str) -> Result<String> {
+    if should_use_local_api_key(normalized_host) {
         return config::get_local_api_key();
     }
     config::get_api_key()
+}
+
+fn should_use_local_api_key(normalized_host: &str) -> bool {
+    is_local_host(normalized_host)
 }
 
 fn is_local_host(host: &str) -> bool {
@@ -947,6 +951,11 @@ mod tests {
     fn is_local_host_rejects_remote_hosts() {
         assert!(!is_local_host("http://192.168.2.32:8384"));
         assert!(!is_local_host("talos:8384"));
+    }
+
+    #[test]
+    fn configured_local_host_uses_local_api_key() {
+        assert!(should_use_local_api_key("http://localhost:8384"));
     }
 
     fn sample_devices() -> Vec<serde_json::Value> {
