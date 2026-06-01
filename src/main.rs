@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn is_local_host_rejects_remote_hosts() {
         assert!(!is_local_host("http://192.168.2.32:8384"));
-        assert!(!is_local_host("talos:8384"));
+        assert!(!is_local_host("nas:8384"));
     }
 
     #[test]
@@ -960,7 +960,7 @@ mod tests {
 
     fn sample_devices() -> Vec<serde_json::Value> {
         vec![
-            json!({"deviceID": "AAAAAAA-BBBB", "name": "talos", "paused": true}),
+            json!({"deviceID": "AAAAAAA-BBBB", "name": "nas", "paused": true}),
             json!({"deviceID": "CCCCCCC-DDDD", "name": "alessio-desktop", "paused": false}),
             json!({"deviceID": "EEEEEEE-FFFF", "name": "aso", "paused": true}),
         ]
@@ -971,7 +971,7 @@ mod tests {
         let devs = sample_devices();
         let selected = select_devices(&devs, None, true, false).unwrap();
         let names: Vec<&str> = selected.iter().map(|(_, n)| n.as_str()).collect();
-        assert_eq!(names, vec!["talos", "aso"]);
+        assert_eq!(names, vec!["nas", "aso"]);
     }
 
     #[test]
@@ -985,9 +985,9 @@ mod tests {
     #[test]
     fn select_devices_matches_by_name_case_insensitive() {
         let devs = sample_devices();
-        let selected = select_devices(&devs, Some("Talos"), false, false).unwrap();
+        let selected = select_devices(&devs, Some("Nas"), false, false).unwrap();
         assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].1, "talos");
+        assert_eq!(selected[0].1, "nas");
     }
 
     #[test]
@@ -1008,7 +1008,7 @@ mod tests {
     #[test]
     fn select_devices_errors_when_all_and_query_combined() {
         let devs = sample_devices();
-        let err = select_devices(&devs, Some("talos"), true, false).unwrap_err();
+        let err = select_devices(&devs, Some("nas"), true, false).unwrap_err();
         assert!(err.to_string().contains("either a device or --all"));
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
             "devices": [{"deviceID": "AAAAAAA-BBBB"}]
         });
         let devices = vec![
-            ("AAAAAAA-BBBB".to_string(), "talos".to_string()),
+            ("AAAAAAA-BBBB".to_string(), "nas".to_string()),
             ("CCCCCCC-DDDD".to_string(), "alessio-desktop".to_string()),
         ];
 
@@ -1058,11 +1058,11 @@ mod tests {
 
     #[test]
     fn add_device_if_missing_appends_only_new_devices() {
-        let mut devices = vec![("AAAAAAA-BBBB".to_string(), "talos".to_string())];
+        let mut devices = vec![("AAAAAAA-BBBB".to_string(), "nas".to_string())];
 
         add_device_if_missing(
             &mut devices,
-            ("AAAAAAA-BBBB".to_string(), "talos-duplicate".to_string()),
+            ("AAAAAAA-BBBB".to_string(), "nas-duplicate".to_string()),
         );
         add_device_if_missing(
             &mut devices,
@@ -1070,6 +1070,6 @@ mod tests {
         );
 
         let names: Vec<&str> = devices.iter().map(|(_, name)| name.as_str()).collect();
-        assert_eq!(names, vec!["talos", "alessio-desktop"]);
+        assert_eq!(names, vec!["nas", "alessio-desktop"]);
     }
 }
