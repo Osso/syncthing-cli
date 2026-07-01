@@ -11,7 +11,7 @@ pub struct Config {
 
 impl Config {
     pub fn host(&self) -> &str {
-        self.host.as_deref().unwrap_or("http://localhost:8384")
+        self.host.as_deref().unwrap_or("http://[::1]:8384")
     }
 }
 
@@ -63,6 +63,11 @@ pub fn get_local_api_key() -> Result<String> {
     extract_api_key_from_path(&st_config)
 }
 
+pub fn get_local_host() -> Result<String> {
+    let st_config = syncthing_config_path();
+    extract_gui_address_from_path(&st_config)
+}
+
 pub fn extract_api_key_from_path(path: &PathBuf) -> Result<String> {
     if path.exists() {
         let content = fs::read_to_string(path).context("Failed to read syncthing config.xml")?;
@@ -76,14 +81,40 @@ pub fn extract_api_key_from_path(path: &PathBuf) -> Result<String> {
     )
 }
 
+pub fn extract_gui_address_from_path(path: &PathBuf) -> Result<String> {
+    if path.exists() {
+        let content = fs::read_to_string(path).context("Failed to read syncthing config.xml")?;
+        return extract_gui_address_from_xml(&content);
+    }
+
+    anyhow::bail!("No Syncthing GUI address found in config at {:?}", path)
+}
+
 pub fn extract_api_key_from_xml(content: &str) -> Result<String> {
     if let Some(start) = content.find("<apikey>") {
         let start = start + 8;
         if let Some(end) = content[start..].find("</apikey>") {
-            return Ok(content[start..start + end].to_string());
+            return Ok(content[start..start + end].trim().to_string());
         }
     }
     anyhow::bail!("No apikey element found in config")
+}
+
+pub fn extract_gui_address_from_xml(content: &str) -> Result<String> {
+    let Some(gui_start) = content.find("<gui") else {
+        anyhow::bail!("No gui element found in config");
+    };
+    let gui = &content[gui_start..];
+    if let Some(start) = gui.find("<address>") {
+        let start = start + 9;
+        if let Some(end) = gui[start..].find("</address>") {
+            let address = gui[start..start + end].trim();
+            if !address.is_empty() {
+                return Ok(address.to_string());
+            }
+        }
+    }
+    anyhow::bail!("No gui address element found in config")
 }
 
 #[cfg(test)]
@@ -96,7 +127,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.api_key, None);
         assert_eq!(config.host, None);
-        assert_eq!(config.host(), "http://localhost:8384");
+        assert_eq!(config.host(), "http://[::1]:8384");
     }
 
     #[test]
@@ -120,6 +151,20 @@ mod tests {
 "#;
         let key = extract_api_key_from_xml(xml).unwrap();
         assert_eq!(key, "abc123def456");
+    }
+
+    #[test]
+    fn test_extract_gui_address_from_xml() {
+        let xml = r#"
+<configuration version="37">
+    <gui enabled="true" tls="false" debugging="false" sendBasicAuthPrompt="false">
+        <address>[::1]:8384</address>
+        <apikey>abc123def456</apikey>
+    </gui>
+</configuration>
+"#;
+        let address = extract_gui_address_from_xml(xml).unwrap();
+        assert_eq!(address, "[::1]:8384");
     }
 
     #[test]
@@ -163,6 +208,18 @@ mod tests {
 
         let key = extract_api_key_from_path(&path).unwrap();
         assert_eq!(key, "mykey123");
+    }
+
+    #[test]
+    fn test_extract_gui_address_from_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.xml");
+
+        let xml = "<configuration><gui><address>[::1]:8384</address></gui></configuration>";
+        fs::write(&path, xml).unwrap();
+
+        let address = extract_gui_address_from_path(&path).unwrap();
+        assert_eq!(address, "[::1]:8384");
     }
 
     #[test]

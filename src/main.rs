@@ -119,13 +119,25 @@ enum FolderCommands {
 }
 
 fn get_client(host_override: Option<&str>) -> Result<api::Client> {
-    let cfg = config::load_config()?;
-    let host = host_override
-        .map(normalize_host)
-        .unwrap_or_else(|| cfg.host().to_string());
+    let host = resolve_host(host_override)?;
     let api_key = api_key_for_host(&host)?;
 
     api::Client::new(&api_key, &host)
+}
+
+fn resolve_host(host_override: Option<&str>) -> Result<String> {
+    if let Some(host) = host_override {
+        return Ok(normalize_host(host));
+    }
+
+    let cfg = config::load_config()?;
+    if cfg.host.is_some() {
+        return Ok(normalize_host(cfg.host()));
+    }
+
+    config::get_local_host()
+        .map(|host| normalize_host(&host))
+        .or_else(|_| Ok(normalize_host(cfg.host())))
 }
 
 fn normalize_host(host: &str) -> String {
@@ -222,7 +234,8 @@ async fn cmd_config(api_key: Option<String>, host: Option<String>) -> Result<()>
             "API Key: {}",
             cfg.api_key.as_deref().unwrap_or("(from syncthing config)")
         );
-        println!("Host: {}", cfg.host());
+        let effective_host = resolve_host(None)?;
+        println!("Host: {}", effective_host);
     } else {
         let mut cfg = config::load_config()?;
         if let Some(key) = api_key {
@@ -956,6 +969,15 @@ mod tests {
     #[test]
     fn configured_local_host_uses_local_api_key() {
         assert!(should_use_local_api_key("http://localhost:8384"));
+    }
+
+    #[test]
+    fn normalize_host_adds_scheme_to_config_style_host() {
+        assert_eq!(
+            normalize_host("192.168.2.32:8384"),
+            "http://192.168.2.32:8384"
+        );
+        assert_eq!(normalize_host("[::1]:8384"), "http://[::1]:8384");
     }
 
     fn sample_devices() -> Vec<serde_json::Value> {
