@@ -946,7 +946,7 @@ fn select_log_entries<'a>(
         return Vec::new();
     };
 
-    messages
+    let matching_entries: Vec<_> = messages
         .iter()
         .filter(|entry| {
             device.is_none_or(|query| {
@@ -956,10 +956,10 @@ fn select_log_entries<'a>(
                     .is_some_and(|message| log_message_matches_device(message, query))
             })
         })
-        .rev()
-        .take(limit)
-        .rev()
-        .collect()
+        .collect();
+    let first_selected = matching_entries.len().saturating_sub(limit);
+
+    matching_entries.into_iter().skip(first_selected).collect()
 }
 
 async fn cmd_log(client: api::Client, device: Option<String>, lines: usize) -> Result<()> {
