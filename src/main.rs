@@ -976,9 +976,13 @@ fn log_message_matches_device(message: &str, device_query: &str) -> bool {
         return false;
     };
 
-    device_id
-        .to_ascii_lowercase()
-        .starts_with(&device_query.to_ascii_lowercase())
+    if device_id.is_empty() {
+        return false;
+    }
+
+    let log_device_id = device_id.to_ascii_lowercase();
+    let query_id = device_query.to_ascii_lowercase();
+    log_device_id.starts_with(&query_id) || query_id.starts_with(&log_device_id)
 }
 
 fn select_log_entries<'a>(
@@ -1273,16 +1277,16 @@ mod tests {
         });
         let logs = json!({
             "messages": [
-                {"message": "Failed to connect (device=AAAAAAA-BBBB error=timeout)"},
+                {"message": "Failed to connect (device=AAAAAAA error=timeout)"},
                 {"message": "Connection established (device=OTHER-DEVICE)"},
-                {"message": "Connection rejected (device=AAAAAAA-BBBB error=unknown device)"}
+                {"message": "Connection rejected (device=AAAAAAA error=unknown device)"}
             ]
         });
 
         assert_eq!(
             device_connection_line(&device, &connections, &logs).as_deref(),
             Some(
-                "desktop (AAAAAAA) connected address=192.0.2.20:22000 last error=Connection rejected (device=AAAAAAA-BBBB error=unknown device)"
+                "desktop (AAAAAAA) connected address=192.0.2.20:22000 last error=Connection rejected (device=AAAAAAA error=unknown device)"
             )
         );
     }
@@ -1297,15 +1301,15 @@ mod tests {
         });
         let logs = json!({
             "messages": [
-                {"message": "Connection rejected (device=X5L7HLY-DEVICE error=unknown device)"},
-                {"message": "Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)"}
+                {"message": "Connection rejected (device=X5L7HLY error=unknown device)"},
+                {"message": "Failed to exchange Hello messages (device=X5L7HLY error=EOF)"}
             ]
         });
 
         assert_eq!(
             pending_connection_lines(&pending, &logs),
             vec![
-                "agent-server (X5L7HLY) at 192.0.2.149:22000 status=rejected as unknown last error=Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)"
+                "agent-server (X5L7HLY) at 192.0.2.149:22000 status=rejected as unknown last error=Failed to exchange Hello messages (device=X5L7HLY error=EOF)"
             ]
         );
     }
