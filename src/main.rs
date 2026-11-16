@@ -29,6 +29,17 @@ enum Commands {
     },
     /// List connected devices
     Devices,
+    /// Show per-device connection details and pending incoming devices
+    Connections,
+    /// Show recent Syncthing log messages
+    Log {
+        /// Filter messages by device ID or ID prefix
+        #[arg(long)]
+        device: Option<String>,
+        /// Number of matching messages to show
+        #[arg(short, long, default_value_t = 50)]
+        lines: usize,
+    },
     /// Manage folder configuration
     Folder {
         #[command(subcommand)]
@@ -794,6 +805,192 @@ async fn print_global_errors(client: &api::Client) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_connections(client: api::Client) -> Result<()> {
+    let devices = client.config_devices().await?;
+    let devices = devices
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("unexpected /rest/config/devices response"))?;
+    let connections = client.connections().await?;
+    let logs = client.system_log().await?;
+    let pending = client.pending_devices().await?;
+
+    println!("Configured devices:");
+    for device in devices {
+        if let Some(line) = device_connection_line(device, &connections, &logs) {
+            println!("  {}", line);
+        }
+    }
+
+    println!("Pending devices:");
+    let pending_lines = pending_connection_lines(&pending, &logs);
+    if pending_lines.is_empty() {
+        println!("  (none)");
+    } else {
+        for line in pending_lines {
+            println!("  {}", line);
+        }
+    }
+    Ok(())
+}
+
+fn device_connection_line(
+    device: &serde_json::Value,
+    connections: &serde_json::Value,
+    logs: &serde_json::Value,
+) -> Option<String> {
+    let (id, name) = device_id_and_name(device)?;
+    let connection = connections
+        .get("connections")
+        .and_then(|items| items.get(&id));
+    let connected = connection
+        .and_then(|connection| connection.get("connected"))
+        .and_then(|connected| connected.as_bool())
+        .unwrap_or(false);
+    let address = connection
+        .and_then(|connection| connection.get("address"))
+        .and_then(|address| address.as_str())
+        .filter(|address| !address.is_empty())
+        .unwrap_or("-");
+    let last_error = latest_device_error(logs, &id).unwrap_or("none");
+    let status = if connected { "connected" } else { "offline" };
+    let short_id = &id[..7.min(id.len())];
+
+    Some(format!(
+        "{} ({}) {} address={} last error={}",
+        name, short_id, status, address, last_error
+    ))
+}
+
+fn pending_connection_lines(devices: &serde_json::Value, logs: &serde_json::Value) -> Vec<String> {
+    let Some(devices) = devices.as_object() else {
+        return Vec::new();
+    };
+
+    devices
+        .iter()
+        .map(|(id, info)| {
+            let base_line = pending_device_line(id, info);
+            let last_error = latest_device_error(logs, id).unwrap_or("none");
+            let rejected_unknown = device_was_rejected_as_unknown(logs, id);
+            let status = if rejected_unknown {
+                "rejected as unknown"
+            } else {
+                "pending"
+            };
+
+            format!("{} status={} last error={}", base_line, status, last_error)
+        })
+        .collect()
+}
+
+fn latest_device_error<'a>(logs: &'a serde_json::Value, device_id: &str) -> Option<&'a str> {
+    let messages = logs.get("messages")?.as_array()?;
+
+    messages.iter().rev().find_map(|entry| {
+        let message = entry.get("message")?.as_str()?;
+        let matches_device = log_message_matches_device(message, device_id);
+        let is_error = log_message_is_error(message);
+        (matches_device && is_error).then_some(message)
+    })
+}
+
+fn device_was_rejected_as_unknown(logs: &serde_json::Value, device_id: &str) -> bool {
+    logs.get("messages")
+        .and_then(|messages| messages.as_array())
+        .is_some_and(|messages| {
+            messages.iter().any(|entry| {
+                entry
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .is_some_and(|message| {
+                        log_message_matches_device(message, device_id)
+                            && message.to_ascii_lowercase().contains("unknown device")
+                    })
+            })
+        })
+}
+
+fn log_message_is_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("error=") || message.contains("failed") || message.contains("rejected")
+}
+
+fn log_message_matches_device(message: &str, device_query: &str) -> bool {
+    if device_query.is_empty() {
+        return false;
+    }
+
+    let Some(device_id) = message
+        .split("device=")
+        .nth(1)
+        .and_then(|field| field.split_whitespace().next())
+        .map(|id| id.trim_matches(|character| matches!(character, '"' | ')' | ',')))
+    else {
+        return false;
+    };
+
+    device_id
+        .to_ascii_lowercase()
+        .starts_with(&device_query.to_ascii_lowercase())
+}
+
+fn select_log_entries<'a>(
+    logs: &'a serde_json::Value,
+    device: Option<&str>,
+    limit: usize,
+) -> Vec<&'a serde_json::Value> {
+    let Some(messages) = logs
+        .get("messages")
+        .and_then(|messages| messages.as_array())
+    else {
+        return Vec::new();
+    };
+
+    messages
+        .iter()
+        .filter(|entry| {
+            device.is_none_or(|query| {
+                entry
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .is_some_and(|message| log_message_matches_device(message, query))
+            })
+        })
+        .rev()
+        .take(limit)
+        .rev()
+        .collect()
+}
+
+async fn cmd_log(client: api::Client, device: Option<String>, lines: usize) -> Result<()> {
+    let logs = client.system_log().await?;
+    if !logs
+        .get("messages")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        anyhow::bail!("unexpected /rest/system/log response");
+    }
+
+    let entries = select_log_entries(&logs, device.as_deref(), lines);
+    if entries.is_empty() {
+        println!("No matching log entries");
+        return Ok(());
+    }
+
+    for entry in entries {
+        let when = entry
+            .get("when")
+            .and_then(|when| when.as_str())
+            .unwrap_or("?");
+        let message = entry
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("?");
+        println!("[{}] {}", when, message);
+    }
+    Ok(())
+}
+
 async fn cmd_pending(client: api::Client) -> Result<()> {
     let devices = client.pending_devices().await?;
     let folders = client.pending_folders().await?;
@@ -807,20 +1004,41 @@ async fn cmd_pending(client: api::Client) -> Result<()> {
 }
 
 fn print_pending_devices(devices: &serde_json::Value) {
-    let Some(devs) = devices.as_object() else {
-        println!("  (none)");
-        return;
-    };
-    if devs.is_empty() {
+    let lines = pending_device_lines(devices);
+    if lines.is_empty() {
         println!("  (none)");
         return;
     }
-    for (id, info) in devs {
-        let name = info
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("unknown");
-        println!("  {} ({})", name, &id[..7.min(id.len())]);
+    for line in lines {
+        println!("  {}", line);
+    }
+}
+
+fn pending_device_lines(devices: &serde_json::Value) -> Vec<String> {
+    let Some(devices) = devices.as_object() else {
+        return Vec::new();
+    };
+
+    devices
+        .iter()
+        .map(|(id, info)| pending_device_line(id, info))
+        .collect()
+}
+
+fn pending_device_line(id: &str, info: &serde_json::Value) -> String {
+    let name = info
+        .get("name")
+        .and_then(|name| name.as_str())
+        .unwrap_or("unknown");
+    let address = info
+        .get("address")
+        .and_then(|address| address.as_str())
+        .filter(|address| !address.is_empty());
+    let short_id = &id[..7.min(id.len())];
+
+    match address {
+        Some(address) => format!("{} ({}) at {}", name, short_id, address),
+        None => format!("{} ({})", name, short_id),
     }
 }
 
@@ -910,6 +1128,8 @@ async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<
         Commands::Status => cmd_status(client).await,
         Commands::Folders { id } => cmd_folders(client, id).await,
         Commands::Devices => cmd_devices(client).await,
+        Commands::Connections => cmd_connections(client).await,
+        Commands::Log { device, lines } => cmd_log(client, device, lines).await,
         Commands::Folder { command } => cmd_folder(client, command).await,
         Commands::Pause { device, all } => cmd_set_paused(client, device, all, true).await,
         Commands::Unpause { device, all } => cmd_set_paused(client, device, all, false).await,
@@ -951,6 +1171,95 @@ mod tests {
     #[test]
     fn pending_folder_lines_returns_empty_for_no_pending_folders() {
         assert!(pending_folder_lines(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn pending_device_lines_show_name_id_and_address() {
+        let devices = json!({
+            "X5L7HLY-XSU76EF-AY4YM6K-L75SLVC-WP7BBXD-V6C7SWR-CAFXNES-2EPCDQU": {
+                "name": "agent-server",
+                "address": "192.0.2.149:22000",
+                "time": "2026-11-16T20:30:16Z"
+            }
+        });
+
+        assert_eq!(
+            pending_device_lines(&devices),
+            vec!["agent-server (X5L7HLY) at 192.0.2.149:22000"]
+        );
+    }
+
+    #[test]
+    fn select_log_entries_filters_by_device_prefix_and_tails_matches() {
+        let logs = json!({
+            "messages": [
+                {"when": "2026-11-16T20:30:00Z", "message": "Connection rejected (device=X5L7HLY-DEVICE error=unknown device)"},
+                {"when": "2026-11-16T20:30:01Z", "message": "Connection established (device=OTHER-DEVICE)"},
+                {"when": "2026-11-16T20:30:02Z", "message": "Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)"},
+                {"when": "2026-11-16T20:30:03Z", "message": "Connection rejected (device=X5L7HLY-DEVICE error=unknown device)"}
+            ]
+        });
+
+        let entries = select_log_entries(&logs, Some("X5L7HLY"), 2);
+        let messages: Vec<&str> = entries
+            .iter()
+            .map(|entry| entry["message"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)",
+                "Connection rejected (device=X5L7HLY-DEVICE error=unknown device)"
+            ]
+        );
+    }
+
+    #[test]
+    fn device_connection_line_includes_status_address_and_last_error() {
+        let device = json!({"deviceID": "AAAAAAA-BBBB", "name": "desktop"});
+        let connections = json!({
+            "connections": {
+                "AAAAAAA-BBBB": {"connected": true, "address": "192.0.2.20:22000"}
+            }
+        });
+        let logs = json!({
+            "messages": [
+                {"message": "Failed to connect (device=AAAAAAA-BBBB error=timeout)"},
+                {"message": "Connection established (device=OTHER-DEVICE)"},
+                {"message": "Connection rejected (device=AAAAAAA-BBBB error=unknown device)"}
+            ]
+        });
+
+        assert_eq!(
+            device_connection_line(&device, &connections, &logs).as_deref(),
+            Some(
+                "desktop (AAAAAAA) connected address=192.0.2.20:22000 last error=Connection rejected (device=AAAAAAA-BBBB error=unknown device)"
+            )
+        );
+    }
+
+    #[test]
+    fn pending_connection_lines_keep_unknown_rejection_and_last_error() {
+        let pending = json!({
+            "X5L7HLY-DEVICE": {
+                "name": "agent-server",
+                "address": "192.0.2.149:22000"
+            }
+        });
+        let logs = json!({
+            "messages": [
+                {"message": "Connection rejected (device=X5L7HLY-DEVICE error=unknown device)"},
+                {"message": "Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)"}
+            ]
+        });
+
+        assert_eq!(
+            pending_connection_lines(&pending, &logs),
+            vec![
+                "agent-server (X5L7HLY) at 192.0.2.149:22000 status=rejected as unknown last error=Failed to exchange Hello messages (device=X5L7HLY-DEVICE error=EOF)"
+            ]
+        );
     }
 
     #[test]

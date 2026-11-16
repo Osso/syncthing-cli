@@ -121,6 +121,10 @@ impl Client {
         self.get("/rest/system/connections").await
     }
 
+    pub async fn system_log(&self) -> Result<Value> {
+        self.get("/rest/system/log").await
+    }
+
     pub async fn errors(&self) -> Result<Value> {
         self.get("/rest/system/error").await
     }
@@ -388,6 +392,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_connections() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/connections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "connections": {
+                    "ABC123": {
+                        "connected": false,
+                        "address": ""
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.connections().await.unwrap();
+
+        assert_eq!(result["connections"]["ABC123"]["connected"], false);
+        assert_eq!(result["connections"]["ABC123"]["address"], "");
+    }
+
+    #[tokio::test]
+    async fn test_system_log() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/system/log"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "messages": [{
+                    "when": "2026-11-16T20:30:16Z",
+                    "message": "Connection rejected (device=ABC123 error=unknown device)"
+                }],
+                "messagesTotal": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.system_log().await.unwrap();
+
+        assert_eq!(
+            result["messages"][0]["message"],
+            "Connection rejected (device=ABC123 error=unknown device)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_post_scan() {
         let mock_server = MockServer::start().await;
 
@@ -426,14 +479,21 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/rest/cluster/pending/devices"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ABC123-DEF456": {
+                    "name": "desktop",
+                    "address": "192.0.2.10:22000",
+                    "time": "2026-11-16T20:30:16Z"
+                }
+            })))
             .mount(&mock_server)
             .await;
 
         let client = Client::new("test-key", &mock_server.uri()).unwrap();
         let result = client.pending_devices().await.unwrap();
 
-        assert!(result.as_object().unwrap().is_empty());
+        assert_eq!(result["ABC123-DEF456"]["name"], "desktop");
+        assert_eq!(result["ABC123-DEF456"]["address"], "192.0.2.10:22000");
     }
 
     #[tokio::test]
