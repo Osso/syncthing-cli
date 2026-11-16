@@ -23,10 +23,58 @@ fn config_path() -> PathBuf {
 }
 
 fn syncthing_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("syncthing")
-        .join("config.xml")
+    #[cfg(windows)]
+    {
+        return windows_syncthing_config_path(
+            &dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let candidates = linux_syncthing_config_paths();
+        if let Some(path) = existing_syncthing_config_path(&candidates) {
+            return path;
+        }
+        return dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("syncthing")
+            .join("config.xml");
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("syncthing")
+            .join("config.xml")
+    }
+}
+
+fn windows_syncthing_config_path(local_app_data: &std::path::Path) -> PathBuf {
+    local_app_data.join("Syncthing").join("config.xml")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_syncthing_config_paths() -> Vec<PathBuf> {
+    let state_dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("state")));
+    let config_dir = dirs::config_dir();
+
+    let mut paths = Vec::new();
+    if let Some(state_dir) = state_dir {
+        paths.push(state_dir.join("syncthing").join("config.xml"));
+    }
+    if let Some(config_dir) = config_dir {
+        paths.push(config_dir.join("syncthing").join("config.xml"));
+    }
+    paths
+}
+
+#[cfg(target_os = "linux")]
+fn existing_syncthing_config_path(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates.iter().find(|path| path.is_file()).cloned()
 }
 
 pub fn load_config() -> Result<Config> {
@@ -196,6 +244,46 @@ mod tests {
 
         assert_eq!(loaded.api_key, Some("test-key".to_string()));
         assert_eq!(loaded.host, Some("http://test:8384".to_string()));
+    }
+
+    #[test]
+    fn windows_syncthing_config_path_uses_local_app_data() {
+        assert_eq!(
+            windows_syncthing_config_path(std::path::Path::new("C:/Users/Alice/AppData/Local")),
+            PathBuf::from("C:/Users/Alice/AppData/Local/Syncthing/config.xml")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn syncthing_config_path_prefers_existing_state_path() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state/syncthing/config.xml");
+        let config_path = dir.path().join("config/syncthing/config.xml");
+        fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&state_path, "<configuration />").unwrap();
+        fs::write(&config_path, "<configuration />").unwrap();
+
+        assert_eq!(
+            existing_syncthing_config_path(&[state_path.clone(), config_path]),
+            Some(state_path)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn syncthing_config_path_uses_config_path_when_state_file_is_absent() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("state/syncthing/config.xml");
+        let config_path = dir.path().join("config/syncthing/config.xml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(&config_path, "<configuration />").unwrap();
+
+        assert_eq!(
+            existing_syncthing_config_path(&[state_path, config_path.clone()]),
+            Some(config_path)
+        );
     }
 
     #[test]
