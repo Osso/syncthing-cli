@@ -25,21 +25,18 @@ fn config_path() -> PathBuf {
 fn syncthing_config_path() -> PathBuf {
     #[cfg(windows)]
     {
-        return windows_syncthing_config_path(
-            &dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")),
-        );
+        windows_syncthing_config_path(&dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")))
     }
 
     #[cfg(target_os = "linux")]
     {
         let candidates = linux_syncthing_config_paths();
-        if let Some(path) = existing_syncthing_config_path(&candidates) {
-            return path;
-        }
-        return dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("syncthing")
-            .join("config.xml");
+        existing_syncthing_config_path(&candidates).unwrap_or_else(|| {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("syncthing")
+                .join("config.xml")
+        })
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
@@ -51,6 +48,7 @@ fn syncthing_config_path() -> PathBuf {
     }
 }
 
+#[cfg(any(windows, test))]
 fn windows_syncthing_config_path(local_app_data: &std::path::Path) -> PathBuf {
     local_app_data.join("Syncthing").join("config.xml")
 }
