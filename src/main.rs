@@ -942,19 +942,20 @@ fn latest_device_error<'a>(logs: &'a serde_json::Value, device_id: &str) -> Opti
 }
 
 fn device_was_rejected_as_unknown(logs: &serde_json::Value, device_id: &str) -> bool {
-    logs.get("messages")
+    let Some(messages) = logs
+        .get("messages")
         .and_then(|messages| messages.as_array())
-        .is_some_and(|messages| {
-            messages.iter().any(|entry| {
-                entry
-                    .get("message")
-                    .and_then(|message| message.as_str())
-                    .is_some_and(|message| {
-                        log_message_matches_device(message, device_id)
-                            && message.to_ascii_lowercase().contains("unknown device")
-                    })
-            })
-        })
+    else {
+        return false;
+    };
+
+    messages.iter().any(|entry| {
+        let Some(message) = entry.get("message").and_then(|message| message.as_str()) else {
+            return false;
+        };
+        let was_rejected = message.to_ascii_lowercase().contains("unknown device");
+        log_message_matches_device(message, device_id) && was_rejected
+    })
 }
 
 fn log_message_is_error(message: &str) -> bool {
@@ -985,6 +986,13 @@ fn log_message_matches_device(message: &str, device_query: &str) -> bool {
     log_device_id.starts_with(&query_id) || query_id.starts_with(&log_device_id)
 }
 
+fn log_entry_matches_device(entry: &serde_json::Value, device_query: &str) -> bool {
+    entry
+        .get("message")
+        .and_then(|message| message.as_str())
+        .is_some_and(|message| log_message_matches_device(message, device_query))
+}
+
 fn select_log_entries<'a>(
     logs: &'a serde_json::Value,
     device: Option<&str>,
@@ -999,14 +1007,7 @@ fn select_log_entries<'a>(
 
     let matching_entries: Vec<_> = messages
         .iter()
-        .filter(|entry| {
-            device.is_none_or(|query| {
-                entry
-                    .get("message")
-                    .and_then(|message| message.as_str())
-                    .is_some_and(|message| log_message_matches_device(message, query))
-            })
-        })
+        .filter(|entry| device.is_none_or(|query| log_entry_matches_device(entry, query)))
         .collect();
     let first_selected = matching_entries.len().saturating_sub(limit);
 
