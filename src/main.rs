@@ -40,6 +40,11 @@ enum Commands {
         #[arg(short, long, default_value_t = 50)]
         lines: usize,
     },
+    /// Manage device configuration
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommands,
+    },
     /// Manage folder configuration
     Folder {
         #[command(subcommand)]
@@ -99,6 +104,18 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
+enum DeviceCommands {
+    /// Add a device by ID
+    Add {
+        /// Syncthing device ID
+        id: String,
+        /// Display name (defaults to the device ID)
+        #[arg(long)]
+        name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum FolderCommands {
     /// Add a new folder and share it with devices
     Add {
@@ -118,9 +135,8 @@ enum FolderCommands {
     Share {
         /// Folder ID
         id: String,
-        /// Device name or ID to share with; repeat for multiple devices
-        #[arg(short, long = "device")]
-        devices: Vec<String>,
+        /// Device name or ID to share with
+        device: String,
     },
     /// Remove a folder from this Syncthing host configuration
     Remove {
@@ -460,6 +476,37 @@ async fn cmd_set_paused(
     Ok(())
 }
 
+async fn cmd_device(client: api::Client, command: DeviceCommands) -> Result<()> {
+    match command {
+        DeviceCommands::Add { id, name } => cmd_device_add(client, id, name).await,
+    }
+}
+
+async fn cmd_device_add(client: api::Client, id: String, name: Option<String>) -> Result<()> {
+    let defaults = client.config_default_device().await?;
+    let device = build_device_config(defaults, &id, name.as_deref())?;
+    client.put_config_device(&id, &device).await?;
+    println!(
+        "added device {} ({})",
+        id,
+        device["name"].as_str().unwrap_or(&id)
+    );
+    Ok(())
+}
+
+fn build_device_config(
+    mut defaults: serde_json::Value,
+    id: &str,
+    name: Option<&str>,
+) -> Result<serde_json::Value> {
+    let device = defaults
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("unexpected /rest/config/defaults/device response"))?;
+    device.insert("deviceID".to_string(), serde_json::json!(id));
+    device.insert("name".to_string(), serde_json::json!(name.unwrap_or(id)));
+    Ok(defaults)
+}
+
 async fn cmd_folder(client: api::Client, command: FolderCommands) -> Result<()> {
     match command {
         FolderCommands::Add {
@@ -468,7 +515,7 @@ async fn cmd_folder(client: api::Client, command: FolderCommands) -> Result<()> 
             label,
             devices,
         } => cmd_folder_add(client, id, path, label, devices).await,
-        FolderCommands::Share { id, devices } => cmd_folder_share(client, id, devices).await,
+        FolderCommands::Share { id, device } => cmd_folder_share(client, id, device).await,
         FolderCommands::Remove { id } => cmd_folder_remove(client, id).await,
     }
 }
@@ -532,8 +579,8 @@ fn add_device_if_missing(devices: &mut Vec<(String, String)>, device: (String, S
     }
 }
 
-async fn cmd_folder_share(client: api::Client, id: String, devices: Vec<String>) -> Result<()> {
-    let selected_devices = resolve_devices(&client, &devices).await?;
+async fn cmd_folder_share(client: api::Client, id: String, device: String) -> Result<()> {
+    let selected_devices = resolve_devices(&client, std::slice::from_ref(&device)).await?;
     let mut folder = client.config_folder(&id).await?;
 
     add_devices_to_folder(&mut folder, &selected_devices)?;
@@ -1130,6 +1177,7 @@ async fn dispatch_with_client(client: api::Client, command: Commands) -> Result<
         Commands::Devices => cmd_devices(client).await,
         Commands::Connections => cmd_connections(client).await,
         Commands::Log { device, lines } => cmd_log(client, device, lines).await,
+        Commands::Device { command } => cmd_device(client, command).await,
         Commands::Folder { command } => cmd_folder(client, command).await,
         Commands::Pause { device, all } => cmd_set_paused(client, device, all, true).await,
         Commands::Unpause { device, all } => cmd_set_paused(client, device, all, false).await,
@@ -1348,6 +1396,72 @@ mod tests {
         let devs = sample_devices();
         let err = select_devices(&devs, None, false, false).unwrap_err();
         assert!(err.to_string().contains("specify a device"));
+    }
+
+    #[test]
+    fn device_add_command_accepts_id_and_optional_name() {
+        let parsed = Cli::try_parse_from([
+            "syncthing-cli",
+            "device",
+            "add",
+            "ABC123-DEF456",
+            "--name",
+            "desktop",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Commands::Device {
+                command: DeviceCommands::Add { id, name: Some(name) }
+            } if id == "ABC123-DEF456" && name == "desktop"
+        ));
+    }
+
+    #[test]
+    fn folder_share_command_accepts_positional_device_id() {
+        let parsed = Cli::try_parse_from([
+            "syncthing-cli",
+            "folder",
+            "share",
+            "agent-config",
+            "ABC123-DEF456",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Commands::Folder {
+                command: FolderCommands::Share { id, device }
+            } if id == "agent-config" && device == "ABC123-DEF456"
+        ));
+    }
+
+    #[test]
+    fn build_device_config_preserves_syncthing_defaults_and_sets_identity() {
+        let defaults = json!({
+            "deviceID": "",
+            "name": "",
+            "addresses": ["dynamic"],
+            "compression": "metadata",
+            "paused": false
+        });
+
+        let device = build_device_config(defaults, "ABC123-DEF456", Some("desktop")).unwrap();
+
+        assert_eq!(device["deviceID"], "ABC123-DEF456");
+        assert_eq!(device["name"], "desktop");
+        assert_eq!(device["addresses"], json!(["dynamic"]));
+        assert_eq!(device["compression"], "metadata");
+        assert_eq!(device["paused"], false);
+    }
+
+    #[test]
+    fn build_device_config_defaults_name_to_device_id() {
+        let device =
+            build_device_config(json!({"deviceID": "", "name": ""}), "ABC123", None).unwrap();
+
+        assert_eq!(device["name"], "ABC123");
     }
 
     #[test]

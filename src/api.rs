@@ -159,6 +159,15 @@ impl Client {
         self.get("/rest/config/devices").await
     }
 
+    pub async fn config_default_device(&self) -> Result<Value> {
+        self.get("/rest/config/defaults/device").await
+    }
+
+    pub async fn put_config_device(&self, device_id: &str, device: &Value) -> Result<Value> {
+        self.put(&format!("/rest/config/devices/{}", device_id), device)
+            .await
+    }
+
     pub async fn put_config_folder(&self, folder_id: &str, folder: &Value) -> Result<Value> {
         self.put(&format!("/rest/config/folders/{}", folder_id), folder)
             .await
@@ -262,7 +271,7 @@ async fn parse_response_body(resp: reqwest::Response) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -346,6 +355,57 @@ mod tests {
         let devices = result.as_array().unwrap();
         assert_eq!(devices.len(), 2);
         assert_eq!(devices[0]["name"], "Laptop");
+    }
+
+    #[tokio::test]
+    async fn test_config_default_device() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/rest/config/defaults/device"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "deviceID": "",
+                "name": "",
+                "addresses": ["dynamic"],
+                "compression": "metadata",
+                "paused": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client.config_default_device().await.unwrap();
+
+        assert_eq!(result["addresses"][0], "dynamic");
+        assert_eq!(result["compression"], "metadata");
+    }
+
+    #[tokio::test]
+    async fn test_put_config_device() {
+        let mock_server = MockServer::start().await;
+        let body = serde_json::json!({
+            "deviceID": "ABC123-DEF456",
+            "name": "desktop",
+            "addresses": ["dynamic"],
+            "compression": "metadata",
+            "paused": false
+        });
+
+        Mock::given(method("PUT"))
+            .and(path("/rest/config/devices/ABC123-DEF456"))
+            .and(header("X-API-Key", "test-key"))
+            .and(body_json(body.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&mock_server)
+            .await;
+
+        let client = Client::new("test-key", &mock_server.uri()).unwrap();
+        let result = client
+            .put_config_device("ABC123-DEF456", &body)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Value::Null);
     }
 
     #[tokio::test]
@@ -509,6 +569,7 @@ mod tests {
         Mock::given(method("PUT"))
             .and(path("/rest/config/folders/agent-config"))
             .and(header("X-API-Key", "test-key"))
+            .and(body_json(body.clone()))
             .respond_with(ResponseTemplate::new(200).set_body_string(""))
             .mount(&mock_server)
             .await;
